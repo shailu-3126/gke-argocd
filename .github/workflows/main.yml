@@ -31,7 +31,6 @@ jobs:
       - name: Authenticate to Google Cloud (keyless - Workload Identity)
         uses: google-github-actions/auth@v1
         with:
-          # prefer secrets; fallback to literal strings if secrets not provided
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/619930646601/locations/global/workloadIdentityPools/github-pool/providers/github-provider' }}
           service_account: ${{ secrets.GCP_SA_EMAIL || 'ci-deployer@shailaja-477403.iam.gserviceaccount.com' }}
 
@@ -52,7 +51,6 @@ jobs:
           if [ ! -f "${CONTEXT_DIR}/Dockerfile" ]; then
             echo "No Dockerfile found — creating a minimal Dockerfile and index.html"
 
-            # Create index.html (use single-quoted EOF to avoid shell expansion)
             cat > ${CONTEXT_DIR}/index.html <<'HTML_EOF'
 <!doctype html>
 <html>
@@ -64,7 +62,6 @@ jobs:
 </html>
 HTML_EOF
 
-            # Create Dockerfile
             cat > ${CONTEXT_DIR}/Dockerfile <<'DOCKER_EOF'
 FROM nginx:alpine
 COPY index.html /usr/share/nginx/html/index.html

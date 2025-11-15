@@ -22,7 +22,6 @@ jobs:
       - name: Authenticate to Google Cloud (keyless - Workload Identity)
         uses: google-github-actions/auth@v1
         with:
-          # Literal provider and service account (keyless). Replace if you prefer to use secrets.
           workload_identity_provider: "projects/619930646601/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
           service_account: "ci-deployer@shailaja-477403.iam.gserviceaccount.com"
 
@@ -35,34 +34,21 @@ jobs:
         run: |
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      - name: Prepare build context (create Dockerfile if missing)
+      - name: Prepare build context (create Dockerfile if missing) 
         run: |
           CONTEXT_DIR="."
           echo "Using build context: $CONTEXT_DIR"
-
           if [ ! -f "${CONTEXT_DIR}/Dockerfile" ]; then
-            echo "No Dockerfile found — creating a minimal Dockerfile and index.html"
+            echo "No Dockerfile found — creating minimal index.html and Dockerfile"
 
-            cat > ${CONTEXT_DIR}/index.html <<'HTML_EOF'
-<!doctype html>
-<html>
-<head><meta charset="utf-8"><title>Frontend Test</title></head>
-<body>
-  <h1>Frontend deployed via GKE + Argo CD</h1>
-  <p>Built by GitHub Actions run: $GITHUB_RUN_ID</p>
-</body>
-</html>
-HTML_EOF
+            # create a minimal static page using printf (no heredoc)
+            printf '%s\n' '<!doctype html>' '<html>' '<head><meta charset="utf-8"><title>Frontend Test</title></head>' '<body>' '  <h1>Frontend deployed via GKE + Argo CD</h1>' "  <p>Built by GitHub Actions run: \$GITHUB_RUN_ID</p>" '</body>' '</html>' > ${CONTEXT_DIR}/index.html
 
-            cat > ${CONTEXT_DIR}/Dockerfile <<'DOCKER_EOF'
-FROM nginx:alpine
-COPY index.html /usr/share/nginx/html/index.html
-EXPOSE 80
-DOCKER_EOF
+            # create a minimal Dockerfile using printf (no heredoc)
+            printf '%s\n' 'FROM nginx:alpine' 'COPY index.html /usr/share/nginx/html/index.html' 'EXPOSE 80' > ${CONTEXT_DIR}/Dockerfile
           else
             echo "Dockerfile exists — using repo files."
           fi
-
           ls -la ${CONTEXT_DIR}
 
       - name: Build & Push Docker image
@@ -83,7 +69,6 @@ DOCKER_EOF
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-
           if [ -d "./apps/frontend" ]; then
             echo "Updating apps/frontend/deployment.yaml in current repo"
             sed -i "s|image: .*|image: ${IMAGE_URI}|g" apps/frontend/deployment.yaml || echo "No change needed or file missing"

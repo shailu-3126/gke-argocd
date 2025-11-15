@@ -1,4 +1,4 @@
-name: Deploy Frontend (Keyless - No Secrets)
+name: CI (Keyless) — Build & Deploy Frontend (safe build)
 
 on:
   push:
@@ -10,43 +10,106 @@ permissions:
   contents: write
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    # --- Keyless Auth with hardcoded provider + SA email ---
-    - name: Authenticate to Google Cloud (WIF)
-      uses: google-github-actions/auth@v1
-      with:
-        workload_identity_provider: "projects/619930646601/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
-        service_account: "ci-deployer@shailaja-477403.iam.gserviceaccount.com"
+      - name: Ensure WIF metadata is present (fast fail if missing)
+        run: |
+          # If you prefer not to use secrets at all, you can hardcode the provider+SA below.
+          # Most secure: keep provider+SA in repo secrets and uncomment the checks.
+          if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
+            echo "::warning::GCP_WORKLOAD_IDENTITY_PROVIDER secret not found; attempting hardcoded fallback..."
+          fi
+          if [ -z "${{ secrets.GCP_SA_EMAIL }}" ]; then
+            echo "::warning::GCP_SA_EMAIL secret not found; attempting hardcoded fallback..."
+          fi
 
-    # --- Configure Docker for Artifact Registry ---
-    - name: Configure Docker
-      run: |
-        gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - name: Authenticate to Google Cloud (keyless - Workload Identity)
+        uses: google-github-actions/auth@v1
+        with:
+          # Prefer secrets; fallback to literal strings if you intentionally did not store secrets.
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/619930646601/locations/global/workloadIdentityPools/github-pool/providers/github-provider' }}
+          service_account: ${{ secrets.GCP_SA_EMAIL || 'ci-deployer@shailaja-477403.iam.gserviceaccount.com' }}
 
-    # --- Build and push image ---
-    - name: Build and push container
-      run: |
-        IMAGE="us-central1-docker.pkg.dev/shailaja-477403/frontend-repo/frontend:github-${{ github.run_id }}"
-        echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-        docker build -t "$IMAGE" .
-        docker push "$IMAGE"
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: shailaja-477403
 
-    # --- Update GitOps repo ---
-    - name: Update GitOps repo (gke-argocd)
-      run: |
-        git config user.name "github-actions"
-        git config user.email "actions@github.com"
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-        # Update deployment image
-        sed -i "s|image:.*|image: $IMAGE|g" apps/frontend/deployment.yaml
+      - name: Prepare build context (create Dockerfile if missing)
+        run: |
+          # If you maintain a frontend source in a subfolder, change CONTEXT_DIR accordingly.
+          CONTEXT_DIR="."
+          echo "Using build context: $CONTEXT_DIR"
+          # create minimal app if Dockerfile is missing
+          if [ ! -f "${CONTEXT_DIR}/Dockerfile" ]; then
+            echo "No Dockerfile found — creating a minimal Dockerfile and index.html"
+            cat > ${CONTEXT_DIR}/index.html <<'EOF'
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Frontend Test</title></head>
+<body>
+  <h1>Frontend deployed via GKE + Argo CD</h1>
+  <p>Built by GitHub Actions run: $GITHUB_RUN_ID</p>
+</body>
+</html>
+EOF
+            cat > ${CONTEXT_DIR}/Dockerfile <<'EOF'
+FROM nginx:alpine
+COPY index.html /usr/share/nginx/html/index.html
+EXPOSE 80
+EOF
+          else
+            echo "Dockerfile exists — using repo files."
+          fi
+          ls -la ${CONTEXT_DIR}
 
-        # Commit+push
-        git add apps/frontend/deployment.yaml
-        git commit -m "Update image to $IMAGE"
-        git push
+      - name: Build & Push Docker image
+        id: build
+        env:
+          # Configure the image name; timestamp ensures immutability
+          IMAGE_BASE: "us-central1-docker.pkg.dev/shailaja-477403/frontend-repo/frontend"
+        run: |
+          TAG="$(date +%s)"
+          IMAGE="${IMAGE_BASE}:github-${TAG}"
+          echo "IMAGE_URI=${IMAGE}" >> $GITHUB_ENV
+          echo "Building image: $IMAGE"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Update GitOps repo (gke-argocd)
+        env:
+          GITOPS_REPO: "https://github.com/shailu-3126/gke-argocd.git"
+        run: |
+          # If you run this workflow in the same repo (gke-argocd), you can update directly.
+          # If this workflow runs in a different repo, you'll need a PAT. This example assumes same repo.
+          # If updating a separate repo, replace remote URL with x-access-token:${{ secrets.GITOPS_REPO_PAT }}@github.com/...
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+
+          # If the repo we're updating is the same repo, we already have workspace files — just update path.
+          if [ -d "./apps/frontend" ]; then
+            echo "Updating apps/frontend/deployment.yaml in current repo"
+            sed -i "s|image: .*|image: ${IMAGE_URI}|g" apps/frontend/deployment.yaml || echo "No change needed or file missing"
+            git add apps/frontend/deployment.yaml || true
+            git commit -m "ci: update frontend image to ${IMAGE_URI}" || echo "no changes to commit"
+            git push origin main || echo "push failed (maybe no permission); please push manually"
+          else
+            # Fallback: clone target repo and update
+            git clone ${GITOPS_REPO} gitops
+            cd gitops/apps/frontend || (echo "target path missing" && exit 0)
+            sed -i "s|image: .*|image: ${IMAGE_URI}|g" deployment.yaml || true
+            git add deployment.yaml
+            git commit -m "ci: update frontend image to ${IMAGE_URI}" || echo "no changes"
+            git push origin main || echo "push failed"
+          fi

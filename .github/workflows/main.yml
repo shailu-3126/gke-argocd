@@ -19,10 +19,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure WIF metadata is present (fast fail if missing)
+      - name: Ensure WIF metadata is present (fast warn if missing)
         run: |
-          # If you prefer not to use secrets at all, you can hardcode the provider+SA below.
-          # Most secure: keep provider+SA in repo secrets and uncomment the checks.
           if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
             echo "::warning::GCP_WORKLOAD_IDENTITY_PROVIDER secret not found; attempting hardcoded fallback..."
           fi
@@ -33,7 +31,7 @@ jobs:
       - name: Authenticate to Google Cloud (keyless - Workload Identity)
         uses: google-github-actions/auth@v1
         with:
-          # Prefer secrets; fallback to literal strings if you intentionally did not store secrets.
+          # prefer secrets; fallback to literal strings if secrets not provided
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/619930646601/locations/global/workloadIdentityPools/github-pool/providers/github-provider' }}
           service_account: ${{ secrets.GCP_SA_EMAIL || 'ci-deployer@shailaja-477403.iam.gserviceaccount.com' }}
 
@@ -48,13 +46,14 @@ jobs:
 
       - name: Prepare build context (create Dockerfile if missing)
         run: |
-          # If you maintain a frontend source in a subfolder, change CONTEXT_DIR accordingly.
           CONTEXT_DIR="."
           echo "Using build context: $CONTEXT_DIR"
-          # create minimal app if Dockerfile is missing
+
           if [ ! -f "${CONTEXT_DIR}/Dockerfile" ]; then
             echo "No Dockerfile found — creating a minimal Dockerfile and index.html"
-            cat > ${CONTEXT_DIR}/index.html <<'EOF'
+
+            # Create index.html (use single-quoted EOF to avoid shell expansion)
+            cat > ${CONTEXT_DIR}/index.html <<'HTML_EOF'
 <!doctype html>
 <html>
 <head><meta charset="utf-8"><title>Frontend Test</title></head>
@@ -63,21 +62,23 @@ jobs:
   <p>Built by GitHub Actions run: $GITHUB_RUN_ID</p>
 </body>
 </html>
-EOF
-            cat > ${CONTEXT_DIR}/Dockerfile <<'EOF'
+HTML_EOF
+
+            # Create Dockerfile
+            cat > ${CONTEXT_DIR}/Dockerfile <<'DOCKER_EOF'
 FROM nginx:alpine
 COPY index.html /usr/share/nginx/html/index.html
 EXPOSE 80
-EOF
+DOCKER_EOF
           else
             echo "Dockerfile exists — using repo files."
           fi
+
           ls -la ${CONTEXT_DIR}
 
       - name: Build & Push Docker image
         id: build
         env:
-          # Configure the image name; timestamp ensures immutability
           IMAGE_BASE: "us-central1-docker.pkg.dev/shailaja-477403/frontend-repo/frontend"
         run: |
           TAG="$(date +%s)"
@@ -91,13 +92,9 @@ EOF
         env:
           GITOPS_REPO: "https://github.com/shailu-3126/gke-argocd.git"
         run: |
-          # If you run this workflow in the same repo (gke-argocd), you can update directly.
-          # If this workflow runs in a different repo, you'll need a PAT. This example assumes same repo.
-          # If updating a separate repo, replace remote URL with x-access-token:${{ secrets.GITOPS_REPO_PAT }}@github.com/...
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
 
-          # If the repo we're updating is the same repo, we already have workspace files — just update path.
           if [ -d "./apps/frontend" ]; then
             echo "Updating apps/frontend/deployment.yaml in current repo"
             sed -i "s|image: .*|image: ${IMAGE_URI}|g" apps/frontend/deployment.yaml || echo "No change needed or file missing"
@@ -105,7 +102,6 @@ EOF
             git commit -m "ci: update frontend image to ${IMAGE_URI}" || echo "no changes to commit"
             git push origin main || echo "push failed (maybe no permission); please push manually"
           else
-            # Fallback: clone target repo and update
             git clone ${GITOPS_REPO} gitops
             cd gitops/apps/frontend || (echo "target path missing" && exit 0)
             sed -i "s|image: .*|image: ${IMAGE_URI}|g" deployment.yaml || true

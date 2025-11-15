@@ -1,0 +1,55 @@
+name: Build & Deploy Frontend (GKE + ArgoCD GitOps)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write       # for Workload Identity Federation
+  contents: write       # to update GitOps repo
+  pull-requests: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout frontend app source
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: shailaja-477403
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build & Push Docker Image
+        id: image
+        run: |
+          IMAGE="us-central1-docker.pkg.dev/shailaja-477403/frontend-repo/frontend:$(date +%s)"
+          echo "IMAGE_URI=$IMAGE" >> $GITHUB_ENV
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      # --- GitOps update step ----
+      - name: Update GitOps Repo (gke-argocd)
+        run: |
+          git clone https://x-access-token:${{ secrets.GITOPS_REPO_PAT }}@github.com/shailu-3126/gke-argocd.git gitops
+          cd gitops/apps/frontend
+
+          echo "Updating image to: $IMAGE_URI"
+          sed -i "s|image: .*|image: ${IMAGE_URI}|g" deployment.yaml
+
+          git add deployment.yaml
+          git commit -m "CI: update frontend image to ${IMAGE_URI}" || echo "No changes"
+          git push origin main

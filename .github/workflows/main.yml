@@ -1,63 +1,52 @@
-name: CI (Keyless) — Build & Deploy Frontend
+name: Deploy Frontend (Keyless - No Secrets)
 
 on:
   push:
-    branches: [ main ]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
-  id-token: write       # allow issuance of OIDC tokens
-  contents: write       # allow committing to gitops repo
+  id-token: write
+  contents: write
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Ensure WIF metadata is present
-        run: |
-          if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
-            echo "::error::Missing secret: GCP_WORKLOAD_IDENTITY_PROVIDER"
-            exit 1
-          fi
-          if [ -z "${{ secrets.GCP_SA_EMAIL }}" ]; then
-            echo "::error::Missing secret: GCP_SA_EMAIL"
-            exit 1
-          fi
+    # --- Keyless Auth with hardcoded provider + SA email ---
+    - name: Authenticate to Google Cloud (WIF)
+      uses: google-github-actions/auth@v1
+      with:
+        workload_identity_provider: "projects/619930646601/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+        service_account: "ci-deployer@shailaja-477403.iam.gserviceaccount.com"
 
-      - name: Authenticate to Google Cloud (keyless - Workload Identity)
-        uses: google-github-actions/auth@v1
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SA_EMAIL }}
+    # --- Configure Docker for Artifact Registry ---
+    - name: Configure Docker
+      run: |
+        gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v1
-        with:
-          project_id: shailaja-477403
+    # --- Build and push image ---
+    - name: Build and push container
+      run: |
+        IMAGE="us-central1-docker.pkg.dev/shailaja-477403/frontend-repo/frontend:github-${{ github.run_id }}"
+        echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+        docker build -t "$IMAGE" .
+        docker push "$IMAGE"
 
-      - name: Configure docker to use Artifact Registry
-        run: |
-          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+    # --- Update GitOps repo ---
+    - name: Update GitOps repo (gke-argocd)
+      run: |
+        git config user.name "github-actions"
+        git config user.email "actions@github.com"
 
-      - name: Build & push container
-        id: build
-        run: |
-          IMAGE="us-central1-docker.pkg.dev/shailaja-477403/frontend-repo/frontend:$(date +%s)"
-          echo "IMAGE_URI=${IMAGE}" >> $GITHUB_ENV
-          docker build -t ${IMAGE} .
-          docker push ${IMAGE}
+        # Update deployment image
+        sed -i "s|image:.*|image: $IMAGE|g" apps/frontend/deployment.yaml
 
-      - name: Update GitOps repo (gke-argocd)
-        env:
-          GITOPS_REPO_PAT: ${{ secrets.GITOPS_REPO_PAT }}
-        run: |
-          git clone https://x-access-token:${GITOPS_REPO_PAT}@github.com/shailu-3126/gke-argocd.git gitops
-          cd gitops/apps/frontend
-          sed -i "s|image: .*|image: ${IMAGE_URI}|g" deployment.yaml || true
-          git add deployment.yaml
-          git commit -m "ci: update frontend image to ${IMAGE_URI}" || echo "no changes"
-          git push origin main
+        # Commit+push
+        git add apps/frontend/deployment.yaml
+        git commit -m "Update image to $IMAGE"
+        git push

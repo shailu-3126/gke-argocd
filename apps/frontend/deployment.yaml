@@ -16,6 +16,6 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: <IMAGE_URI>
+        image: us-central1-docker.pkg.dev/shailaja-477403/frontend-repo/frontend:v1
         ports:
         - containerPort: 80
